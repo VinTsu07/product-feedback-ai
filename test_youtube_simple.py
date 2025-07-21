@@ -20,7 +20,7 @@ def test_detailed_results():
         "task_id": "detailed-test",
         "product_name": "iPhone 15",
         "search_plan": {
-            "youtube_query": "iPhone 15 problems issues",
+            "youtube_query": ["iPhone 15 problems issues", "iPhone 15 review"],
             "max_videos": 5
         }
     }

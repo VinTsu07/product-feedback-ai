@@ -56,7 +56,7 @@ class YouTubeAgent(BaseAgent):
             self.logger.error(f"❌ Failed to initialize YouTube API client: {str(e)}")
             return None
         
-    def search_videos(self, product_name: str, search_query: str, max_results: int = 20) -> List[Dict[str, Any]]:
+    def search_videos(self, product_name: str, search_query: List, max_results: int = 20) -> List[Dict[str, Any]]:
         """
         Search for YouTube videos related to the product with intelligent query strategy
         
@@ -78,10 +78,9 @@ class YouTubeAgent(BaseAgent):
         
         try:
             # Multi-query strategy for better coverage
-            search_queries = self._generate_search_queries(product_name, search_query)
-            videos_per_query = max(1, max_results // len(search_queries))
+            videos_per_query = max(1, max_results // len(search_query))
             
-            for query in search_queries:
+            for query in search_query:
                 self.logger.info(f"🔍 Searching YouTube for: '{query}'")
                 
                 # YouTube Data API search request
@@ -129,43 +128,6 @@ class YouTubeAgent(BaseAgent):
         except Exception as e:
             self.logger.error(f"❌ Video search failed: {str(e)}")
             return []
-
-    def _generate_search_queries(self, product_name: str, base_query: str) -> List[str]:
-        """
-        Generate multiple search queries for better video coverage
-        
-        Args:
-            product_name: Product name (e.g., "iPhone 15 Pro")
-            base_query: Base search query from orchestrator
-            
-        Returns:
-            List[str]: List of search query variations
-        """
-        queries = [base_query]  # Start with orchestrator's query
-        
-        # Add specific problem-focused queries
-        problem_queries = [
-            f"{product_name} problems issues",
-            f"{product_name} review honest",
-            f"{product_name} test",
-            f"{product_name} worth it"
-        ]
-        
-        # Add comparison queries for competitive insights
-        competitor_map = {
-            'iphone': ['samsung galaxy', 'google pixel'],
-            'tesla': ['bmw electric', 'mercedes eqc'],
-            'macbook': ['dell xps', 'surface laptop']
-        }
-        
-        product_lower = product_name.lower()
-        for key, competitors in competitor_map.items():
-            if key in product_lower:
-                queries.append(f"{product_name} vs {competitors[0]}")
-                break
-        
-        queries.extend(problem_queries)
-        return queries[:4]  # Limit to 4 queries to manage quota
 
     def _parse_search_result(self, item: Dict, search_query: str) -> Optional[Dict[str, Any]]:
         """
@@ -397,7 +359,7 @@ class YouTubeAgent(BaseAgent):
 
     def _update_relevance_score(self, video: Dict[str, Any]) -> float:
         """
-        Update relevance score based on metadata
+        Update relevance score based on basic metrics
         
         Args:
             video: Video data with metadata
@@ -407,25 +369,11 @@ class YouTubeAgent(BaseAgent):
         """
         base_score = video.get('relevance_score', 0.0)
         
-        # Boost score for high engagement
+        # Simple engagement boost
         engagement_rate = video.get('engagement_rate', 0.0)
-        engagement_boost = min(engagement_rate * 2, 0.3)  # Max boost of 0.3
+        engagement_boost = min(engagement_rate * 2, 0.2)  # Max boost of 0.2
         
-        # Boost score for good view count (indicates popularity)
-        view_count = video.get('view_count', 0)
-        view_boost = 0.0
-        if view_count > 100000:
-            view_boost = 0.2
-        elif view_count > 10000:
-            view_boost = 0.1
-        
-        # Penalty for very short or very long videos
-        duration = video.get('duration_seconds', 0)
-        duration_penalty = 0.0
-        if duration < 60 or duration > 1800:  # Less than 1min or more than 30min
-            duration_penalty = -0.1
-        
-        final_score = base_score + engagement_boost + view_boost + duration_penalty
+        final_score = base_score + engagement_boost
         return max(0.0, min(1.0, final_score))  # Keep between 0 and 1
     
     def extract_video_transcripts(self, videos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -504,7 +452,6 @@ class YouTubeAgent(BaseAgent):
                 }
                 self.logger.error(f"❌ Transcript extraction failed for {video_id}: {str(e)}")
             
-            # Small delay to be respectful
             time.sleep(0.2)
         
         transcripts_found = sum(1 for v in videos if v.get('transcript', {}).get('available', False))
@@ -539,7 +486,7 @@ class YouTubeAgent(BaseAgent):
         
         try:
             # Phase 1: Video Discovery
-            youtube_query = search_plan.get("youtube_query", f"{product_name} review")
+            youtube_query = search_plan.get("youtube_query", [f"{product_name} review"])
             max_videos = search_plan.get("max_videos", 15)  # Reasonable default for prototype
             
             self.logger.info(f"🔍 Searching for videos with query: '{youtube_query}'")
@@ -551,7 +498,7 @@ class YouTubeAgent(BaseAgent):
             
             if not videos:
                 self.logger.warning("⚠️ No videos found")
-                return self._format_empty_results(task_data, "No videos found")
+                return {"error": "No videos found", "youtube_results": []}
             
             self.logger.info(f"📹 Found {len(videos)} videos")
             
@@ -567,20 +514,11 @@ class YouTubeAgent(BaseAgent):
             # Phase 4: Transcript Extraction (for detailed analysis)
             self.logger.info(f"📝 Extracting transcripts for detailed analysis...")
             videos_with_transcripts = self.extract_video_transcripts(filtered_videos)
-
-            # Phase 5: Comment Extraction (top N videos only for prototype)
-            top_videos_for_comments = self._select_top_videos_for_comments(videos_with_transcripts, max_count=5)
-
-            if top_videos_for_comments:
-                self.logger.info(f"💬 Extracting comments from top {len(top_videos_for_comments)} videos...")
-                videos_with_comments = self.extract_video_comments(top_videos_for_comments)
-            else:
-                videos_with_comments = videos_with_transcripts
             
             # Phase 6: Results Processing
             processing_time = time.time() - start_time
             final_results = self._prepare_final_results(
-                videos_with_comments, 
+                videos_with_transcripts, 
                 task_data, 
                 processing_time
             )
@@ -629,33 +567,6 @@ class YouTubeAgent(BaseAgent):
         
         return filtered
 
-    def _select_top_videos_for_comments(self, videos: List[Dict[str, Any]], max_count: int = 5) -> List[Dict[str, Any]]:
-        """
-        Select top videos for comment extraction based on relevance and engagement
-        
-        Args:
-            videos: Filtered video list
-            max_count: Maximum number of videos to process for comments
-            
-        Returns:
-            List[Dict]: Top videos for comment extraction
-        """
-        if not videos:
-            return []
-        
-        # Sort by combined score of relevance and engagement
-        def video_score(video):
-            relevance = video.get('relevance_score', 0.0)
-            engagement = video.get('engagement_rate', 0.0)
-            view_count = video.get('view_count', 0)
-            
-            # Weighted scoring: relevance (50%), engagement (30%), popularity (20%)
-            popularity_score = min(view_count / 100000, 1.0)  # Normalize to 0-1
-            return 0.5 * relevance + 0.3 * engagement + 0.2 * popularity_score
-        
-        sorted_videos = sorted(videos, key=video_score, reverse=True)
-        return sorted_videos[:max_count]
-
     def _prepare_final_results(self, videos: List[Dict[str, Any]], task_data: Dict[str, Any], processing_time: float) -> Dict[str, Any]:
         """
         Format final results for the orchestrator state
@@ -674,9 +585,6 @@ class YouTubeAgent(BaseAgent):
         total_comments = sum(video.get('comment_count', 0) for video in videos)
         avg_relevance = sum(video.get('relevance_score', 0) for video in videos) / max(total_videos, 1)
         
-        # Extract preliminary insights (basic for prototype)
-        preliminary_insights = self._extract_preliminary_insights(videos)
-        
         return self.format_output({
             "youtube_results": videos,
             "summary_stats": {
@@ -686,7 +594,6 @@ class YouTubeAgent(BaseAgent):
                 "average_relevance_score": round(avg_relevance, 3),
                 "api_quota_used": self.quota_used
             },
-            "preliminary_insights": preliminary_insights,
             "processing_metadata": {
                 "processing_time_seconds": round(processing_time, 2),
                 "product_analyzed": task_data["product_name"],
@@ -695,60 +602,6 @@ class YouTubeAgent(BaseAgent):
             },
             "status": "completed"
         })
-
-    def _extract_preliminary_insights(self, videos: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Extract basic insights from video data (before full NLP analysis)
-        
-        Args:
-            videos: Processed video data
-            
-        Returns:
-            Dict: Preliminary insights
-        """
-        insights = {
-            "potential_pain_points": [],
-            "positive_signals": [],
-            "reviewer_types": {"tech_reviewers": 0, "general_users": 0, "unknown": 0}
-        }
-        
-        # Simple keyword-based preliminary analysis
-        pain_keywords = ['problem', 'issue', 'bug', 'broken', 'worst', 'hate', 'disappointed']
-        positive_keywords = ['love', 'amazing', 'best', 'perfect', 'recommend', 'excellent']
-        
-        for video in videos:
-            title_lower = video.get('title', '').lower()
-            description_lower = video.get('description', '').lower()
-            content = f"{title_lower} {description_lower}"
-            
-            # Detect potential pain points
-            for keyword in pain_keywords:
-                if keyword in content:
-                    insights["potential_pain_points"].append({
-                        "keyword": keyword,
-                        "video_title": video.get('title', ''),
-                        "video_id": video.get('video_id', '')
-                    })
-            
-            # Detect positive signals
-            for keyword in positive_keywords:
-                if keyword in content:
-                    insights["positive_signals"].append({
-                        "keyword": keyword,
-                        "video_title": video.get('title', ''),
-                        "video_id": video.get('video_id', '')
-                    })
-            
-            # Classify reviewer type (basic heuristics)
-            channel_name = video.get('channel_title', '').lower()
-            if any(term in channel_name for term in ['tech', 'review', 'unbox', 'gadget']):
-                insights["reviewer_types"]["tech_reviewers"] += 1
-            elif any(term in channel_name for term in ['official', 'apple', 'samsung', 'tesla']):
-                insights["reviewer_types"]["tech_reviewers"] += 1  # Brand channels
-            else:
-                insights["reviewer_types"]["general_users"] += 1
-        
-        return insights
 
     def _format_empty_results(self, task_data: Dict[str, Any], reason: str) -> Dict[str, Any]:
         """Format empty results when no videos are found"""
@@ -770,19 +623,3 @@ class YouTubeAgent(BaseAgent):
             "status": "failed",
             "api_quota_used": self.quota_used
         }
-    
-    def extract_video_comments(self, videos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Extract comments from videos (basic implementation for testing)
-        """
-        if not self.youtube or not videos:
-            return videos
-            
-        self.logger.info(f"💬 Extracting comments from {len(videos)} videos...")
-        
-        # For prototype, just add empty comments structure
-        for video in videos:
-            video['comments'] = []  # Will implement full comment extraction later
-            video['comments_processed'] = True
-            
-        return videos
